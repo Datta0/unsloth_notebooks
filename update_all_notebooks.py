@@ -6,6 +6,176 @@ import shutil
 import subprocess
 from datetime import datetime
 from glob import glob
+from nbconvert import PythonExporter
+import nbformat
+
+
+def update_old_unsloth(filename):
+    with open(filename, "r", encoding = "utf-8") as f: f = f.read()
+
+    # Convert versions like X.X.X to 2025.12.8
+    f = re.sub(r"[\d]{4}\.[\d]{1,2}\.[\d]{1,2}([^\d])", r"2025.12.8\1", f)
+
+    # Fix all A=A to A = A
+    # "    id2label=id2label,\n",
+    f = re.sub(
+        r'(\"[ ]{4,}[^\= ]{2,})\=([^\= ]{2,}\,\\n\"\,)',
+        r"\1 = \2",
+        f,
+    )
+
+    # Change gguf-quantization-options link
+    f = f.replace(
+        "https://github.com/unslothai/unsloth/wiki#gguf-quantization-options",
+        "https://docs.unsloth.ai/basics/inference-and-deployment/saving-to-gguf#locally"
+    )
+
+    # Fix dangling newlines like
+    """
+    if False:
+    model.push_to_hub("hf/model", token = "")
+    tokenizer.push_to_hub("hf/model", token = "")
+
+    """
+    f = re.sub(r"\)\\n([\"\']\n[ ]{2,}\])", r")\1", f)
+
+    # Redirect Alpaca dataset
+    f = f.replace(
+        "https://huggingface.co/datasets/yahma/alpaca-cleaned",
+        "https://huggingface.co/datasets/unsloth/alpaca-cleaned",
+    )
+    f = f.replace(
+        "Alpaca dataset from [yahma]",
+        "[Alpaca dataset]",
+    )
+
+    # Train on completions
+    f = f.replace(
+        "TRL's docs [here](https://huggingface.co/docs/trl/sft_trainer#train-on-completions-only).",
+        "our docs [here](https://docs.unsloth.ai/get-started/fine-tuning-llms-guide/lora-hyperparameters-guide#training-on-completions-only-masking-out-inputs)",
+    )
+
+    # Conversational notebook
+    f = f.replace(
+        "conversational [notebook](https://colab.research.google.com/github/unslothai/notebooks/blob/main/nb/Llama3_(8B)-Alpaca.ipynb)",
+        "conversational [notebook](https://colab.research.google.com/github/unslothai/notebooks/blob/main/nb/Llama3.2_(1B_and_3B)-Conversational.ipynb)",
+    )
+
+    # Fix Meta-Llama
+    f = f.replace(
+        "unsloth/Meta-Llama",
+        "unsloth/Llama",
+    )
+
+    # Move dtype into calling
+    if '"dtype = None # None for auto detection. Float16 for Tesla T4, V100, Bfloat16 for Ampere+\n",\n    ' in f and \
+        '"    dtype = dtype,\n",' in f:
+        f = f.replace(
+            '"dtype = None # None for auto detection. Float16 for Tesla T4, V100, Bfloat16 for Ampere+\n",\n    ',
+            '',
+        )
+        f = f.replace(
+            '"    dtype = dtype,\n",',
+            '"    dtype = dtype, # None for auto detection. Float16 for T4, Bfloat16 for Ampere, H100+\n",',
+        )
+
+    # TRL's `DPOTrainer`
+    f = f.replace("TRL's `DPOTrainer`", "`DPOTrainer` and `GRPOTrainer` for reinforcement learning!")
+
+    # Move packing = ...
+    packing = '''"    packing = False, # Can make training 5x faster for short sequences.\n",
+    "    args = SFTConfig(\n",'''
+    if packing in f:
+        f = f.replace(packing, "")
+        f = f.replace(
+            '''"        max_steps = 60,\n",
+    ''',
+            '''""        max_steps = 60,\n",
+    "        packing = False, # Makes training 2-5x faster for short sequences,\n",
+    ''')
+
+    # VLLM to vLLM, but avoid underscores/dashes or word-part matches
+    f = re.sub(r'(?<![A-Za-z0-9_-])VLLM(?![A-Za-z0-9_-])', "vLLM", f)
+    f = f.replace(
+        "You can go to https://huggingface.co/settings/tokens for your personal tokens.",
+        "You can go to https://huggingface.co/settings/tokens for your personal tokens. See [our docs](https://docs.unsloth.ai/basics/inference-and-deployment) for more deployment options."
+    )
+
+    # Fix saving for LoRA adapters only
+    f = f.replace('model.save_pretrained(\"model\")', 'model.save_pretrained(\"lora_model\")')
+    f = f.replace('tokenizer.save_pretrained(\"model\")', 'tokenizer.save_pretrained(\"lora_model\")')
+    f = f.replace('model.push_to_hub(\"hf/model\", token = \"\")', 'model.push_to_hub(\"hf/lora_model\", token = \"\")')
+    f = f.replace('tokenizer.push_to_hub(\"hf/model\", token = \"\")', 'tokenizer.push_to_hub(\"hf/lora_model\", token = \"\")')
+
+    # Fix 16bit
+    f = f.replace('model.save_pretrained_merged(\"model\", tokenizer, save_method = \"merged_16bit\",)', 'model.save_pretrained_merged(\"model_16bit\", tokenizer, save_method = \"merged_16bit\",)')
+    f = f.replace('model.push_to_hub_merged(\"hf/model\", tokenizer, save_method = \"merged_16bit\", token = \"\")', 'model.push_to_hub_merged(\"hf/model_16bit\", tokenizer, save_method = \"merged_16bit\", token = \"\")')
+
+    # Fix 4bit
+    f = f.replace('model.save_pretrained_merged(\"model\", tokenizer, save_method = \"merged_4bit\",)', 'model.save_pretrained_merged(\"model_4bit\", tokenizer, save_method = \"merged_4bit\",)')
+    f = f.replace('model.push_to_hub_merged(\"hf/model\", tokenizer, save_method = \"merged_4bit\", token = \"\")', 'model.push_to_hub_merged(\"hf/model_4bit\", tokenizer, save_method = \"merged_4bit\", token = \"\")')
+
+    with open(filename, "w", encoding = "utf-8") as w: w.write(f)
+pass
+
+
+DONT_UPDATE_EXCEPTIONS = [
+    "Falcon_H1-Alpaca.ipynb",
+    "Liquid_LFM2-Conversational.ipynb",
+    "Advanced_Llama3_1_(3B)_GRPO_LoRA.ipynb", # Daniel's?
+    "gpt_oss_(20B)_Reinforcement_Learning_2048_Game.ipynb",
+    "gpt_oss_(20B)_Reinforcement_Learning_2048_Game_DGX_Spark.ipynb",
+    "gpt_oss_(20B)_Reinforcement_Learning_2048_Game_BF16.ipynb",
+    "Qwen3_VL_(8B)-Vision-GRPO.ipynb",
+    "OpenEnv_gpt_oss_(20B)_Reinforcement_Learning_2048_Game.ipynb",
+    "OpenEnv_gpt_oss_(20B)_Reinforcement_Learning_2048_Game_BF16.ipynb",
+    "Synthetic_Data_Hackathon.ipynb",
+    "Ministral_3_(3B)_Reinforcement_Learning_Sudoku_Game.ipynb"
+]
+
+
+FIRST_MAPPING_NAME = {
+    "gpt-oss-(20B)-Fine-tuning.ipynb" : "gpt_oss_(20B)-Fine-tuning.ipynb",
+    "Qwen2_5_7B_VL_GRPO.ipynb" : "Qwen2.5_VL_(7B)-Vision-GRPO.ipynb",
+    "Qwen3_(4B)-Instruct.ipynb" : "Qwen3_(4B)-Conversational.ipynb",
+    "Qwen3_(4B)_Instruct-QAT.ipynb" : "Qwen3_(4B)-QAT.ipynb",
+
+    # GPT OSS 
+    "gpt_oss_(20B)_Reinforcement_Learning_2048_Game_DGX_Spark.ipynb" : "(DGX Spark)-gpt-oss-(20B)-GRPO-2048.ipynb",
+    "gpt_oss_(20B)_Reinforcement_Learning_2048_Game.ipynb" : "gpt-oss-(20B)-GRPO-2048.ipynb",
+    "Deepseek_OCR_(3B).ipynb" : "Deepseek_OCR_(3B)-Fine-Tuning.ipynb",
+    "OpenEnv_gpt_oss_(20B)_Reinforcement_Learning_2048_Game_BF16.ipynb" : "(OpenEnv)-gpt-oss-BF16-(20B)-GRPO-2048.ipynb",
+    "gpt_oss_(20B)_Reinforcement_Learning_2048_Game_BF16.ipynb" : "gpt-oss-BF16-(20B)-GRPO-2048.ipynb",
+    "OpenEnv_gpt_oss_(20B)_Reinforcement_Learning_2048_Game.ipynb" : "(OpenEnv)-gpt-oss-(20B)-GRPO-2048.ipynb",
+    "GPT_OSS_BNB_(20B)-Inference.ipynb" : "gpt-oss-BNB-(20B)-Inference.ipynb",
+    "GPT_OSS_MXFP4_(20B)-Inference.ipynb" : "gpt-oss-MXFP4-(20B)-Inference.ipynb",
+    "gpt_oss_(20B)_500K_Context_Fine_tuning" : "gpt_oss_(20B)-500K-Context.ipynb",
+
+    # Gemma
+    "Gemma3_(4B).ipynb" : "Gemma3_(4B)-Conversational.ipynb",
+    "Gemma3_(270M).ipynb" : "Gemma3_(270M)-Conversational.ipynb",
+
+    # Granite
+    "Granite4.0_350M.ipynb" : "Granite4.0_(350M)-Conversational.ipynb",
+    "Granite4.0.ipynb" : "Granite4.0_(3B)-Conversational.ipynb",
+
+    # Bert
+    "bert_classification.ipynb" : "ModernBERT_(Large)-Classification.ipynb",
+
+    # Whisper
+    "Whisper.ipynb" : "Whisper_(Large)-Fine-Tuning.ipynb",
+
+    # Spark
+    "Spark_TTS_(0_5B).ipynb" : "Spark_TTS_(0.5B)-TTS.ipynb",
+
+    # FP8
+    "Qwen3_8B_FP8_GRPO.ipynb" : "Qwen3_(8B)-FP8-GRPO.ipynb",
+    "Llama_FP8_GRPO.ipynb" : "Llama3.2_(1B)-FP8-GRPO.ipynb",
+
+    # Ministral
+    "Ministral_3_VL_(3B)_Vision.ipynb" : "Ministral3_VL_(3B)-Vision.ipynb",
+    "Ministral_3_(3B)_Reinforcement_Learning_Sudoku_Game.ipynb" : "Ministral3_(3B)-GRPO-Sudoku.ipynb"
+}
 
 def get_current_git_branch():
     try:
@@ -25,6 +195,25 @@ def get_current_git_branch():
         print("Error: 'git' command not found. Make sure Git is installed and in your PATH.")
         return None
 
+
+def update_or_append_pip_install(base_content, package_name, new_install_line):
+    pattern = re.compile(rf"^!(uv )?pip install .*?{package_name}.*$", re.MULTILINE)
+
+    updated_content, substitutions_count = pattern.subn(new_install_line, base_content)
+
+    if substitutions_count == 0:
+        output = base_content.strip() + "\n" + new_install_line
+    else:
+        output = updated_content
+    # Convert pip install transformers==4.56.2\npip install --no-deps trl==0.22.2 to &&
+    finder = r"!pip install transformers==([\d\.]{3,})\n!pip install --no-deps trl==([\d\.]{3,})"
+    found = re.findall(finder, output)
+    if len(found) != 0:
+        transformers, trl = found[0]
+        new = f"!pip install transformers=={transformers} && pip install --no-deps trl=={trl}"
+        output = re.sub(finder, new, output)
+    return output
+
 current_branch = get_current_git_branch()
 # =======================================================
 # GENERAL ANNOUNCEMENTS (THE VERY TOP)
@@ -37,9 +226,12 @@ general_announcement_content = """To run this, press "*Runtime*" and press "*Run
 <a href="https://docs.unsloth.ai/"><img src="https://github.com/unslothai/unsloth/blob/main/images/documentation%20green%20button.png?raw=true" width="125"></a></a> Join Discord if you need help + ⭐ <i>Star us on <a href="https://github.com/unslothai/unsloth">Github</a> </i> ⭐
 </div>
 
-To install Unsloth on your own computer, follow the installation instructions on our Github page [here](https://docs.unsloth.ai/get-started/installing-+-updating).
+To install Unsloth your local device, follow [our guide](https://docs.unsloth.ai/get-started/install-and-update). This notebook is licensed [LGPL-3.0](https://github.com/unslothai/notebooks?tab=LGPL-3.0-1-ov-file#readme).
 
 You will learn how to do [data prep](#Data), how to [train](#Train), how to [run the model](#Inference), & [how to save it](#Save)"""
+
+general_announcement_content_a100 = general_announcement_content.replace("on a **free** Tesla T4 Google Colab instance!", "on your A100 Google Colab Pro instance!")
+general_announcement_content_fp8 = general_announcement_content.replace("on a **free** Tesla T4 Google Colab instance!", "on your L4 Google Colab Pro instance!")
 
 announcement_separation = '<div class="align-center">'
 
@@ -57,29 +249,60 @@ general_announcement_content_hf_course = (
 general_announcement_content_meta = general_announcement_content.split(announcement_separation)
 general_announcement_content_meta = general_announcement_content_meta[0] + "\n\n" + '<a href="https://github.com/meta-llama/synthetic-data-kit"><img src="https://raw.githubusercontent.com/unslothai/notebooks/refs/heads/main/assets/meta%20round%20logo.png" width="137"></a>' + general_announcement_content_meta[1]
 
+# CONSTANT
+PIN_TRANSFORMERS = "!pip install transformers==4.56.2"
+UV_PIN_TRANSFORMERS = PIN_TRANSFORMERS.replace("pip", "uv pip")
+
+PIN_TRL = "!pip install --no-deps trl==0.22.2"
+UV_PIN_TRL = PIN_TRL.replace("pip", "uv pip")
+SPACES = " " * 4
+
 # =======================================================
 # INSTALLATION (MANY OF THIS IS SPECIFIC TO ONE OF THE NOTEBOOKS)
 # =======================================================
 
+XFORMERS_INSTALL = """xformers = 'xformers==' + {'2.9':'0.0.33.post1','2.8':'0.0.32.post2'}.get(v, "0.0.33.post1")"""
+
 installation_content = """%%capture
-import os
+import os, re
 if "COLAB_" not in "".join(os.environ.keys()):
-    !pip install unsloth
+    !pip install unsloth  # Do this in local & cloud setups
 else:
-    # Do this only in Colab notebooks! Otherwise use pip install unsloth
-    !pip install --no-deps bitsandbytes accelerate xformers==0.0.29.post3 peft trl triton cut_cross_entropy unsloth_zoo
-    !pip install sentencepiece protobuf "datasets>=3.4.1,<4.0.0" huggingface_hub hf_transfer
-    !pip install --no-deps unsloth"""
+    import torch; v = re.match(r'[\d]{1,}\.[\d]{1,}', str(torch.__version__)).group(0)
+    __XFORMERS_INSTALL__
+    !pip install sentencepiece protobuf "datasets==4.3.0" "huggingface_hub>=0.34.0" hf_transfer
+    !pip install --no-deps unsloth_zoo bitsandbytes accelerate {xformers} peft trl triton unsloth
+""".replace("__XFORMERS_INSTALL__", XFORMERS_INSTALL)
+installation_content = update_or_append_pip_install(
+    installation_content,
+    "transformers",
+    PIN_TRANSFORMERS,
+)
+installation_content = update_or_append_pip_install(
+    installation_content,
+    "trl",
+    PIN_TRL,
+)
 
 installation_kaggle_content = """%%capture
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 !pip install pip3-autoremove
-!pip install torch torchvision torchaudio xformers --index-url https://download.pytorch.org/whl/cu124
+!pip install torch torchvision torchaudio xformers --index-url https://download.pytorch.org/whl/cu128
 !pip install unsloth
-!pip install --upgrade transformers==4.53.2
+!pip install --upgrade transformers "huggingface_hub>=0.34.0" "datasets==4.3.0"
 """
+
+installation_kaggle_content = update_or_append_pip_install(
+    installation_kaggle_content,
+    "transformers",
+    PIN_TRANSFORMERS,
+)
+installation_kaggle_content = update_or_append_pip_install(
+    installation_kaggle_content,
+    "trl",
+    PIN_TRL,
+)
 
 # =======================================================
 # GRPO Notebook
@@ -87,38 +310,64 @@ os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 installation_grpo_content = """%%capture
 import os
+os.environ["UNSLOTH_VLLM_STANDBY"] = "1" # [NEW] Extra 30% context lengths!
 if "COLAB_" not in "".join(os.environ.keys()):
+    # If you're not in Colab, just use pip install or uv pip install
     !pip install unsloth vllm
 else:
-    # [NOTE] Do the below ONLY in Colab! Use [[pip install unsloth vllm]]
-    !pip install --no-deps unsloth vllm==0.8.5.post1"""
+    pass # For Colab / Kaggle, we need extra instructions hidden below \\/"""
 
 installation_extra_grpo_content = r"""#@title Colab Extra Install { display-mode: "form" }
 %%capture
 import os
+!pip install --upgrade -qqq uv
 if "COLAB_" not in "".join(os.environ.keys()):
+    # If you're not in Colab, just use pip install!
     !pip install unsloth vllm
 else:
-    !pip install --no-deps unsloth vllm==0.8.5.post1
-    # [NOTE] Do the below ONLY in Colab! Use [[pip install unsloth vllm]]
-    # Skip restarting message in Colab
-    import sys, re, requests; modules = list(sys.modules.keys())
-    for x in modules: sys.modules.pop(x) if "PIL" in x or "google" in x else None
-    !pip install --no-deps bitsandbytes accelerate xformers==0.0.29.post3 peft trl triton cut_cross_entropy unsloth_zoo
-    !pip install sentencepiece protobuf "datasets>=3.4.1,<4.0.0" huggingface_hub hf_transfer
-    
-    # vLLM requirements - vLLM breaks Colab due to reinstalling numpy
-    f = requests.get("https://raw.githubusercontent.com/vllm-project/vllm/refs/heads/main/requirements/common.txt").content
-    with open("vllm_requirements.txt", "wb") as file:
-        file.write(re.sub(rb"(transformers|numpy|xformers)[^\n]{1,}\n", b"", f))
-    !pip install -r vllm_requirements.txt"""
+    try: import numpy, PIL; _numpy = f'numpy=={numpy.__version__}'; _pil = f'pillow=={PIL.__version__}'
+    except: _numpy = "numpy"; _pil = "pillow"
+    try: import subprocess; is_t4 = "Tesla T4" in str(subprocess.check_output(["nvidia-smi"]))
+    except: is_t4 = False
+    _vllm, _triton = ('vllm==0.9.2', 'triton==3.2.0') if is_t4 else ('vllm==0.10.2', 'triton')
+    !uv pip install -qqq --upgrade {_vllm} {_numpy} {_pil} torchvision bitsandbytes xformers unsloth
+    !uv pip install -qqq {_triton}"""
+
+installation_extra_grpo_content = update_or_append_pip_install(
+    installation_extra_grpo_content,
+    "transformers",
+    UV_PIN_TRANSFORMERS,
+)
+installation_extra_grpo_content = update_or_append_pip_install(
+    installation_extra_grpo_content,
+    "trl",
+    UV_PIN_TRL,
+)
 
 
 installation_grpo_kaggle_content = """%%capture
-!pip install pip3-autoremove
-!pip install torch torchvision torchaudio xformers --index-url https://download.pytorch.org/whl/cu124
-!pip install unsloth vllm
-# !pip install --upgrade transformers==4.52.3"""
+import os
+os.environ["UNSLOTH_VLLM_STANDBY"] = "1" # [NEW] Extra 30% context lengths!
+!pip install --upgrade -qqq uv
+try: import numpy, PIL; _numpy = f'numpy=={numpy.__version__}'; _pil = f'pillow=={PIL.__version__}'
+except: _numpy = "numpy"; _pil = "pillow"
+try: import subprocess; is_t4 = "Tesla T4" in str(subprocess.check_output(["nvidia-smi"]))
+except: is_t4 = False
+_vllm, _triton = ('vllm==0.9.2', 'triton==3.2.0') if is_t4 else ('vllm==0.10.2', 'triton')
+!uv pip install -qqq --upgrade {_vllm} {_numpy} {_pil} torchvision bitsandbytes xformers unsloth
+!uv pip install -qqq {_triton} "huggingface_hub>=0.34.0" "datasets==4.3.0"""
+
+installation_grpo_kaggle_content = update_or_append_pip_install(
+    installation_grpo_kaggle_content,
+    "transformers",
+    UV_PIN_TRANSFORMERS,
+)
+
+installation_grpo_kaggle_content = update_or_append_pip_install(
+    installation_grpo_kaggle_content,
+    "trl",
+    UV_PIN_TRL,
+)
 
 # =======================================================
 # Meta Synthetic Data Kit Notebook
@@ -126,45 +375,108 @@ installation_grpo_kaggle_content = """%%capture
 
 installation_synthetic_data_content = """%%capture
 import os
+!pip install --upgrade -qqq uv
 if "COLAB_" not in "".join(os.environ.keys()):
-    !pip install unsloth vllm
-    !pip install synthetic-data-kit==0.0.3
+    # If you're not in Colab, just use pip install!
+    !pip install unsloth vllm synthetic-data-kit==0.0.3
 else:
-    # [NOTE] Do the below ONLY in Colab! Use [[pip install unsloth vllm]]
-    !pip install --no-deps unsloth vllm==0.8.5.post1
-    !pip install synthetic-data-kit==0.0.3
-"""
+    try: import numpy, PIL; _numpy = f'numpy=={numpy.__version__}'; _pil = f'pillow=={PIL.__version__}'
+    except: _numpy = "numpy"; _pil = "pillow"
+    try: import subprocess; is_t4 = "Tesla T4" in str(subprocess.check_output(["nvidia-smi"]))
+    except: is_t4 = False
+    _vllm, _triton = ('vllm==0.9.2', 'triton==3.2.0') if is_t4 else ('vllm==0.10.2', 'triton')
+    !uv pip install -qqq --upgrade {_vllm} {_numpy} {_pil} torchvision bitsandbytes xformers unsloth
+    !uv pip install -qqq {_triton}
+    !uv pip install synthetic-data-kit==0.0.3"""
+
+installation_synthetic_data_content = update_or_append_pip_install(
+    installation_synthetic_data_content,
+    "transformers",
+    UV_PIN_TRANSFORMERS,
+)
+
+installation_synthetic_data_content = update_or_append_pip_install(
+    installation_synthetic_data_content,
+    "trl",
+    UV_PIN_TRL,
+)
 
 installation_grpo_synthetic_data_content = """%%capture
-!pip install pip3-autoremove
-!pip install torch torchvision torchaudio xformers --index-url https://download.pytorch.org/whl/cu124
-!pip install unsloth vllm
-# !pip install --upgrade transformers==4.52.3
-!pip install synthetic-data-kit==0.0.3"""
+!pip install --upgrade -qqq uv
+try: import numpy, PIL; _numpy = f"numpy=={numpy.__version__}"; _pil = f"pillow=={PIL.__version__}"
+except: _numpy = "numpy"; _pil = "pillow"
+try: import subprocess; is_t4 = "Tesla T4" in str(subprocess.check_output(["nvidia-smi"]))
+except: is_t4 = False
+_vllm, _triton = ('vllm==0.9.2', 'triton==3.2.0') if is_t4 else ('vllm==0.10.2', 'triton')
+!uv pip install -qqq --upgrade unsloth {_vllm} {_numpy} {_pil} torchvision bitsandbytes xformers
+!uv pip install -qqq {_triton}
+!uv pip install "huggingface_hub>=0.34.0" "datasets==4.3.0"
+!uv pip install synthetic-data-kit==0.0.3"""
+installation_grpo_synthetic_data_content = update_or_append_pip_install(
+    installation_grpo_synthetic_data_content,
+    "transformers",
+    UV_PIN_TRANSFORMERS,
+)
+installation_grpo_synthetic_data_content = update_or_append_pip_install(
+    installation_grpo_synthetic_data_content,
+    "trl",
+    UV_PIN_TRL,
+)
 
 # =======================================================
 # Orpheus Notebook
 # =======================================================
 
 # Add install snac under install unsloth
-installation_orpheus_content = installation_content + """\n!pip install snac"""
-installation_orpheus_kaggle_content = installation_kaggle_content + """\n!pip install snac"""
+installation_orpheus_content = installation_content + """\n!pip install snac torchcodec \"datasets>=3.4.1,<4.0.0\""""
+installation_orpheus_kaggle_content = installation_kaggle_content + """\n!pip install snac torchcodec \"datasets>=3.4.1,<4.0.0\""""
 
 # =======================================================
 # Whisper Notebook
 # =======================================================
 
-installation_whisper_content = installation_content + """\n!pip install librosa soundfile evaluate jiwer"""
-installation_whisper_kaggle_content = installation_kaggle_content + """\n!pip install librosa soundfile evaluate jiwer"""
+installation_whisper_content = installation_content + """\n!pip install librosa soundfile evaluate jiwer torchcodec \"datasets>=3.4.1,<4.0.0\""""
+installation_whisper_kaggle_content = installation_kaggle_content + """\n!pip install librosa soundfile evaluate jiwer torchcodec \"datasets>=3.4.1,<4.0.0\""""
 
 # =======================================================
 # Spark Notebook
 # =======================================================
 
 installation_spark_content = installation_content + """\n!git clone https://github.com/SparkAudio/Spark-TTS
-!pip install omegaconf einx"""
+!pip install omegaconf einx torchcodec \"datasets>=3.4.1,<4.0.0\""""
 installation_spark_kaggle_content = installation_kaggle_content + """\n!git clone https://github.com/SparkAudio/Spark-TTS
-!pip install omegaconf einx"""
+!pip install omegaconf einx torchcodec \"datasets>=3.4.1,<4.0.0\""""
+
+# =======================================================
+# GPT OSS Notebook
+# =======================================================
+installation_gpt_oss_content = r"""%%capture
+import os, importlib.util
+!pip install --upgrade -qqq uv
+if importlib.util.find_spec("torch") is None or "COLAB_" in "".join(os.environ.keys()):    
+    try: import numpy, PIL; _numpy = f"numpy=={numpy.__version__}"; _pil = f"pillow=={PIL.__version__}"
+    except: _numpy = "numpy"; _pil = "pillow"
+    !uv pip install -qqq \
+        "torch>=2.8.0" "triton>=3.4.0" {_numpy} {_pil} torchvision bitsandbytes "transformers==4.56.2" \
+        "unsloth_zoo[base] @ git+https://github.com/unslothai/unsloth-zoo" \
+        "unsloth[base] @ git+https://github.com/unslothai/unsloth" \
+        git+https://github.com/triton-lang/triton.git@0add68262ab0a2e33b84524346cb27cbb2787356#subdirectory=python/triton_kernels
+elif importlib.util.find_spec("unsloth") is None:
+    !uv pip install -qqq unsloth
+!uv pip install --upgrade --no-deps transformers==4.56.2 tokenizers trl==0.22.2 unsloth unsloth_zoo"""
+
+# installation_gpt_oss_content = update_or_append_pip_install(
+#     installation_gpt_oss_content,
+#     "transformers",
+#     "!uv pip install transformers==4.56.2",
+# )
+# installation_gpt_oss_content = update_or_append_pip_install(
+#     installation_gpt_oss_content,
+#     "trl",
+#     UV_PIN_TRL,
+# )
+
+installation_gpt_oss_kaggle_content = installation_gpt_oss_content
 
 # =======================================================
 # Oute Notebook
@@ -176,16 +488,17 @@ import os
 os.remove("/content/OuteTTS/outetts/models/gguf_model.py")
 os.remove("/content/OuteTTS/outetts/interface.py")
 os.remove("/content/OuteTTS/outetts/__init__.py")
-!pip install pyloudnorm openai-whisper uroman MeCab loguru flatten_dict ffmpy randomname argbind tiktoken ftfy
+!pip install pyloudnorm openai-whisper uroman MeCab loguru flatten_dict ffmpy randomname argbind tiktoken ftfy torchcodec \"datasets>=3.4.1,<4.0.0\"
 !pip install descript-audio-codec descript-audiotools julius openai-whisper --no-deps
 %env UNSLOTH_DISABLE_FAST_GENERATION = 1"""
+
 installation_oute_kaggle_content = installation_kaggle_content + """\n!pip install omegaconf einx
 !rm -rf OuteTTS && git clone https://github.com/edwko/OuteTTS
 import os
 os.remove("/content/OuteTTS/outetts/models/gguf_model.py")
 os.remove("/content/OuteTTS/outetts/interface.py")
 os.remove("/content/OuteTTS/outetts/__init__.py")
-!pip install pyloudnorm openai-whisper uroman MeCab loguru flatten_dict ffmpy randomname argbind tiktoken ftfy
+!pip install pyloudnorm openai-whisper uroman MeCab loguru flatten_dict ffmpy randomname argbind tiktoken ftfy torchcodec \"datasets>=3.4.1,<4.0.0\"
 !pip install descript-audio-codec descript-audiotools julius openai-whisper --no-deps
 %env UNSLOTH_DISABLE_FAST_GENERATION = 1"""
 
@@ -193,24 +506,35 @@ os.remove("/content/OuteTTS/outetts/__init__.py")
 # Llasa Notebook
 # =======================================================
 
-installation_llasa_content = """%%capture
+# Llasa Need Unsloth==2025.4.1, Transformers==4.48 to running stable, and trl ==0.15.2
+# installation_llasa_content = re.sub(r'\bunsloth\b(==[\d\.]*)?', 'unsloth==2025.4.1', installation_content)
+installation_llasa_content = installation_content
+installation_llasa_content = re.sub(r'\btrl\b(==[\d\.]*)?', 'trl==0.15.2', installation_llasa_content)
 
-# Note Llasa needs unsloth==2025.4.1 and transformers==4.48 to be stable!
-import os
-if "COLAB_" not in "".join(os.environ.keys()):
-    !pip install unsloth==2025.4.1
-else:
-    # Do this only in Colab notebooks! Otherwise use pip install unsloth
-    !pip install --no-deps bitsandbytes accelerate xformers==0.0.29.post3 peft trl==0.15.2 triton cut_cross_entropy unsloth_zoo
-    !pip install sentencepiece protobuf "datasets>=3.4.1,<4.0.0" huggingface_hub hf_transfer
-    !pip install --no-deps unsloth==2025.4.1
+installation_llasa_content += """\
 
 !pip install torchtune torchao vector_quantize_pytorch einx tiktoken xcodec2==0.1.5 --no-deps
-!pip install transformers==4.48 omegaconf
+!pip install omegaconf torchcodec \"datasets>=3.4.1,<4.0.0\"
 %env UNSLOTH_DISABLE_FAST_GENERATION = 1"""
+installation_llasa_content = update_or_append_pip_install(
+    installation_llasa_content,
+    "transformers",
+    "!pip install transformers==4.56.1",
+)
 
 installation_llasa_kaggle_content = installation_kaggle_content + """\n!pip install torchtune torchao vector_quantize_pytorch einx tiktoken xcodec2==0.1.5 --no-deps
-!pip install transformers==4.48 omegaconf\n%env UNSLOTH_DISABLE_FAST_GENERATION = 1"""
+!pip install omegaconf torchcodec \"datasets>=3.4.1,<4.0.0\"
+%env UNSLOTH_DISABLE_FAST_GENERATION = 1"""
+installation_llasa_kaggle_content = update_or_append_pip_install(
+    installation_llasa_kaggle_content,
+    "transformers",
+    "!pip install transformers==4.48",
+)
+installation_llasa_kaggle_content = update_or_append_pip_install(
+    installation_llasa_kaggle_content,
+    "trl",
+    PIN_TRL,
+)
 
 # =======================================================
 # Tool Calling Notebook
@@ -224,16 +548,195 @@ installation_tool_calling_kaggle_content = installation_kaggle_content + """\n!p
 # =======================================================
 # Sesame CSM Notebook
 # =======================================================
-installation_sesame_csm_content = installation_content + """\n!pip install transformers==4.52.3"""
-installation_sesame_csm_kaggle_content = installation_kaggle_content + """\n!pip install transformers==4.52.3"""
+installation_sesame_csm_content = installation_content + """\n!pip install torchcodec \"datasets>=3.4.1,<4.0.0\""""
+installation_sesame_csm_content = update_or_append_pip_install(
+    installation_sesame_csm_content,
+    "transformers",
+    "!pip install transformers==4.52.3",
+)
+installation_sesame_csm_content = update_or_append_pip_install(
+    installation_sesame_csm_content,
+    "trl",
+    PIN_TRL
+)
+
+installation_sesame_csm_kaggle_content = installation_kaggle_content + """\n!pip install torchcodec \"datasets>=3.4.1,<4.0.0\""""
+installation_sesame_csm_kaggle_content = update_or_append_pip_install(
+    installation_sesame_csm_kaggle_content,
+    "transformers",
+    "!pip install transformers==4.52.3 torchcodec",
+)
+installation_sesame_csm_kaggle_content = update_or_append_pip_install(
+    installation_sesame_csm_kaggle_content,
+    "trl",
+    PIN_TRL
+)
+
+# =======================================================
+# Llama Vision Notebook
+# =======================================================
+installation_llama_vision_content = installation_content
+installation_llama_vision_content = update_or_append_pip_install(
+    installation_llama_vision_content,
+    "transformers",
+    PIN_TRANSFORMERS,
+)
+installation_llama_vision_content = update_or_append_pip_install(
+    installation_llama_vision_content,
+    "trl",
+    PIN_TRL
+)
+
+
+installation_llama_vision_kaggle_content = installation_kaggle_content
+installation_llama_vision_kaggle_content = update_or_append_pip_install(
+    installation_llama_vision_kaggle_content,
+    "transformers",
+    PIN_TRANSFORMERS,
+)
+installation_llama_vision_kaggle_content = update_or_append_pip_install(
+    installation_llama_vision_kaggle_content,
+    "trl",
+    PIN_TRL
+)
+
+# =======================================================
+# Gemma3N Notebook
+# =======================================================
+gemma3n_extra_content = """\
+
+!pip install torchcodec
+import torch; torch._dynamo.config.recompile_limit = 64;"""
+installation_gemma3n_content = installation_content 
+installation_gemma3n_content += gemma3n_extra_content
+
+installation_gemma3n_kaggle_content = installation_kaggle_content
+installation_gemma3n_kaggle_content += gemma3n_extra_content
+
+# =======================================================
+# Qwen3VL Notebook
+# =======================================================
+gemma3n_extra_content = """\
+
+!pip install torchcodec
+import torch; torch._dynamo.config.recompile_limit = 64;"""
+installation_qwen3_vl_content = installation_content 
+installation_qwen3_vl_content = update_or_append_pip_install(
+    installation_qwen3_vl_content,
+    "transformers",
+    "!pip install transformers==4.57.1",
+)
+
+installation_qwen3_vl_kaggle_content  = installation_kaggle_content
+installation_qwen3_vl_kaggle_content  = update_or_append_pip_install(
+    installation_qwen3_vl_kaggle_content,
+    "transformers",
+    "!pip install transformers==4.57.1",
+)
+
+
+
+# =======================================================
+# SGLang Notebook
+# =======================================================
+installation_sglang_content = """%%capture
+import sys
+import os
+!git clone https://github.com/sgl-project/sglang.git && cd sglang && pip install -e "python[all]"
+!pip install -U transformers==4.53.0
+sys.path.append(f'{os.getcwd()}/sglang/')
+sys.path.append(f'{os.getcwd()}/sglang/python')"""
+installation_sglang_kaggle_content = installation_sglang_content
+
+# =======================================================
+# Deepseek OCR Notebook
+# =======================================================
+installation_deepseek_ocr_content = installation_content
+installation_deepseek_ocr_content += """\n!pip install jiwer
+!pip install einops addict easydict"""
+
+installation_deepseek_ocr_kaggle_content = installation_kaggle_content
+installation_deepseek_ocr_kaggle_content += """\n!pip install jiwer
+!pip install einops addict easydict"""
+
+# =======================================================
+# ERNIE_4_5_VL Notebook
+# =======================================================
+installation_ernie_4_5_vl_content = installation_content
+installation_ernie_4_5_vl_content += """\n!pip install decord"""
+
+installation_ernie_4_5_vl_kaggle_content = installation_kaggle_content
+installation_ernie_4_5_vl_kaggle_content += """\n!pip install decord"""
+
+# =======================================================
+# Nemotron 3 Nano  Notebook
+# =======================================================
+installation_nemotron_nano_content = """%%capture
+import os, importlib.util
+!pip install --upgrade -qqq uv
+if importlib.util.find_spec("torch") is None or "COLAB_" in "".join(os.environ.keys()):    
+    try: import numpy, PIL; _numpy = f"numpy=={numpy.__version__}"; _pil = f"pillow=={PIL.__version__}"
+    except: _numpy = "numpy"; _pil = "pillow"
+    !uv pip install -qqq \\
+        "torch==2.7.1" "triton>=3.3.0" {_numpy} {_pil} torchvision bitsandbytes "transformers==4.56.2" \\
+        "unsloth_zoo[base] @ git+https://github.com/unslothai/unsloth-zoo" \\
+        "unsloth[base] @ git+https://github.com/unslothai/unsloth"
+elif importlib.util.find_spec("unsloth") is None:
+    !uv pip install -qqq unsloth
+!uv pip install --upgrade --no-deps transformers==4.56.2 tokenizers trl==0.22.2 unsloth unsloth_zoo
+
+# Mamba is supported only on torch==2.7.1. If you have newer torch versions, please wait 30 minutes!
+!uv pip install --no-build-isolation mamba_ssm==2.2.5 causal_conv1d==1.5.2"""
+
+installation_nemotron_nano_kaggle_content = installation_nemotron_nano_content
+
+
+# =======================================================
+# QAT Notebook
+# =======================================================
+installation_qat_content = """%%capture
+import os, re
+if "COLAB_" not in "".join(os.environ.keys()):
+    !pip install unsloth
+else:
+    # Do this only in Colab notebooks! Otherwise use pip install unsloth
+    import torch; v = re.match(r"[0-9]{1,}\.[0-9]{1,}", str(torch.__version__)).group(0)
+    __XFORMERS_INSTALL__
+    !pip install --no-deps unsloth_zoo bitsandbytes accelerate {xformers} peft trl triton unsloth
+    !pip install sentencepiece protobuf "datasets==4.3.0" "huggingface_hub>=0.34.0" hf_transfer
+!pip install torchao==0.14.0 fbgemm-gpu-genai==1.4.2
+!pip install transformers==4.55.4 && pip install --no-deps trl==0.22.2""".replace("__XFORMERS_INSTALL__", XFORMERS_INSTALL)
+installation_qat_kaggle_content = installation_qat_content
+
+# =======================================================
+# Ministral Notebook
+# =======================================================
+installation_ministral_content = installation_content
+installation_ministral_content = update_or_append_pip_install(
+    installation_ministral_content,
+    "transformers",
+    "!pip install git+https://github.com/huggingface/transformers.git@bf3f0ae70d0e902efab4b8517fce88f6697636ce"
+)
+
+installation_ministral_kaggle_content = installation_kaggle_content
+installation_ministral_kaggle_content = update_or_append_pip_install(
+    installation_ministral_kaggle_content,
+    "transformers",
+    "!pip install git+https://github.com/huggingface/transformers.git@bf3f0ae70d0e902efab4b8517fce88f6697636ce"
+)
 
 # =======================================================
 # NEWS (WILL KEEP CHANGING THIS)
 # =======================================================
 
-new_announcement = """Unsloth now supports Text-to-Speech (TTS) models. Read our [guide here](https://docs.unsloth.ai/basics/text-to-speech-tts-fine-tuning).
+new_announcement = """
+New 3x faster training & 30% less VRAM. New kernels, padding-free & packing. [Blog](https://docs.unsloth.ai/new/3x-faster-training-packing)
 
-Read our **[Gemma 3N Guide](https://docs.unsloth.ai/basics/gemma-3n-how-to-run-and-fine-tune)** and check out our new **[Dynamic 2.0](https://docs.unsloth.ai/basics/unsloth-dynamic-2.0-ggufs)** quants which outperforms other quantization methods!
+You can now train with 500K context windows on a single 80GB GPU. [Blog](https://docs.unsloth.ai/new/500k-context-length-fine-tuning)
+
+Unsloth's [Docker image](https://hub.docker.com/r/unsloth/unsloth) is here! Start training with no setup & environment issues. [Read our Guide](https://docs.unsloth.ai/new/how-to-train-llms-with-unsloth-and-docker).
+
+New in Reinforcement Learning: [FP8 RL](https://docs.unsloth.ai/new/fp8-reinforcement-learning) • [Vision RL](https://docs.unsloth.ai/new/vision-reinforcement-learning-vlm-rl) • [Standby](https://docs.unsloth.ai/basics/memory-efficient-rl) (faster, less VRAM RL) • [gpt-oss RL](https://docs.unsloth.ai/new/gpt-oss-reinforcement-learning)
 
 Visit our docs for all our [model uploads](https://docs.unsloth.ai/get-started/all-our-models) and [notebooks](https://docs.unsloth.ai/get-started/unsloth-notebooks)."""
 
@@ -241,23 +744,26 @@ Visit our docs for all our [model uploads](https://docs.unsloth.ai/get-started/a
 # LAST BLOCK CLOSE STATEMENT
 # =======================================================
 
-text_for_last_cell_gguf = """Now, use the `model-unsloth.gguf` file or `model-unsloth-Q4_K_M.gguf` file in llama.cpp or a UI based system like Jan or Open WebUI. You can install Jan [here](https://github.com/janhq/jan) and Open WebUI [here](https://github.com/open-webui/open-webui)
+OTHER_RESOURCES = """Some other resources:
+1. Looking to use Unsloth locally? Read our [Installation Guide](https://docs.unsloth.ai/get-started/install-and-update) for details on installing Unsloth on Windows, Docker, AMD, Intel GPUs.
+2. Learn how to do Reinforcement Learning with our [RL Guide and notebooks](https://docs.unsloth.ai/get-started/reinforcement-learning-rl-guide).
+3. Read our guides and notebooks for [Text-to-speech (TTS)](https://docs.unsloth.ai/basics/text-to-speech-tts-fine-tuning) and [vision](https://docs.unsloth.ai/basics/vision-fine-tuning) model support.
+4. Explore our [LLM Tutorials Directory](https://docs.unsloth.ai/models/tutorials-how-to-fine-tune-and-run-llms) to find dedicated guides for each model.
+5. Need help with Inference? Read our [Inference & Deployment page](https://docs.unsloth.ai/basics/inference-and-deployment) for details on using vLLM, llama.cpp, Ollama etc.
+"""
 
-And we're done! If you have any questions on Unsloth, we have a [Discord](https://discord.gg/unsloth) channel! If you find any bugs or want to keep updated with the latest LLM stuff, or need help, join projects etc, feel free to join our Discord!
+text_for_last_cell_gguf = """And we're done! If you have any questions on Unsloth, we have a [Discord](https://discord.gg/unsloth) channel! If you find any bugs or want to keep updated with the latest LLM stuff, or need help, join projects etc, feel free to join our Discord!
 
-Some other links:
-1. Train your own reasoning model - Llama GRPO notebook [Free Colab](https://colab.research.google.com/github/unslothai/notebooks/blob/main/nb/Llama3.1_(8B)-GRPO.ipynb)
-2. Saving finetunes to Ollama. [Free notebook](https://colab.research.google.com/github/unslothai/notebooks/blob/main/nb/Llama3_(8B)-Ollama.ipynb)
-3. Llama 3.2 Vision finetuning - Radiography use case. [Free Colab](https://colab.research.google.com/github/unslothai/notebooks/blob/main/nb/Llama3.2_(11B)-Vision.ipynb)
-6. See notebooks for DPO, ORPO, Continued pretraining, conversational finetuning and more on our [documentation](https://docs.unsloth.ai/get-started/unsloth-notebooks)!
-
+__OTHER_RESOURCES__
 <div class="align-center">
   <a href="https://unsloth.ai"><img src="https://github.com/unslothai/unsloth/raw/main/images/unsloth%20new%20logo.png" width="115"></a>
   <a href="https://discord.gg/unsloth"><img src="https://github.com/unslothai/unsloth/raw/main/images/Discord.png" width="145"></a>
   <a href="https://docs.unsloth.ai/"><img src="https://github.com/unslothai/unsloth/blob/main/images/documentation%20green%20button.png?raw=true" width="125"></a>
 
   Join Discord if you need help + ⭐️ <i>Star us on <a href="https://github.com/unslothai/unsloth">Github</a> </i> ⭐️
-</div>"""
+
+  <b>This notebook and all Unsloth notebooks are licensed [LGPL-3.0](https://github.com/unslothai/notebooks?tab=LGPL-3.0-1-ov-file#readme)</b>
+</div>""".replace("__OTHER_RESOURCES__", OTHER_RESOURCES)
 
 text_for_last_cell_ollama = text_for_last_cell_gguf.replace("Now, ", "You can also ", 1)
 
@@ -265,59 +771,72 @@ text_for_last_cell_gemma3 = text_for_last_cell_gguf.replace("model-unsloth", "ge
 
 text_for_last_cell_non_gguf = """And we're done! If you have any questions on Unsloth, we have a [Discord](https://discord.gg/unsloth) channel! If you find any bugs or want to keep updated with the latest LLM stuff, or need help, join projects etc, feel free to join our Discord!
 
-Some other links:
-1. Train your own reasoning model - Llama GRPO notebook [Free Colab](https://colab.research.google.com/github/unslothai/notebooks/blob/main/nb/Llama3.1_(8B)-GRPO.ipynb)
-2. Saving finetunes to Ollama. [Free notebook](https://colab.research.google.com/github/unslothai/notebooks/blob/main/nb/Llama3_(8B)-Ollama.ipynb)
-3. Llama 3.2 Vision finetuning - Radiography use case. [Free Colab](https://colab.research.google.com/github/unslothai/notebooks/blob/main/nb/Llama3.2_(11B)-Vision.ipynb)
-6. See notebooks for DPO, ORPO, Continued pretraining, conversational finetuning and more on our [documentation](https://docs.unsloth.ai/get-started/unsloth-notebooks)!
-
+__OTHER_RESOURCES__
 <div class="align-center">
   <a href="https://unsloth.ai"><img src="https://github.com/unslothai/unsloth/raw/main/images/unsloth%20new%20logo.png" width="115"></a>
   <a href="https://discord.gg/unsloth"><img src="https://github.com/unslothai/unsloth/raw/main/images/Discord.png" width="145"></a>
   <a href="https://docs.unsloth.ai/"><img src="https://github.com/unslothai/unsloth/blob/main/images/documentation%20green%20button.png?raw=true" width="125"></a>
 
   Join Discord if you need help + ⭐️ <i>Star us on <a href="https://github.com/unslothai/unsloth">Github</a> </i> ⭐️
-</div>"""
+
+  This notebook and all Unsloth notebooks are licensed [LGPL-3.0](https://github.com/unslothai/notebooks?tab=LGPL-3.0-1-ov-file#readme)
+</div>""".replace("__OTHER_RESOURCES__", OTHER_RESOURCES)
 
 hf_course_name = "HuggingFace Course"
 
 ARCHITECTURE_MAPPING = {
     # Gemma Family
-    'gemma': 'Gemma',
-    'codegemma': 'Gemma', # Explicitly map specific models if needed
+    "gemma": "Gemma",
+    "codegemma": "Gemma", # Explicitly map specific models if needed
 
     # Llama Family
-    'llama': 'Llama',
-    'tinylama': 'Llama',
+    "llama": "Llama",
+    "tinylama": "Llama",
 
     # Qwen Family
-    'qwen': 'Qwen',
+    "qwen": "Qwen",
 
     # Phi Family
-    'phi': 'Phi',
+    "phi": "Phi",
 
     # Mistral Family
-    'mistral': 'Mistral',
-    'pixtral': 'Mistral',
-    'zephyr': 'Mistral',
+    "mistral": "Mistral",
+    "pixtral": "Mistral",
+    "zephyr": "Mistral",
+    "Magistral" : "Mistral",
+    "Ministral" : "Mistral",
 
     # Whisper
-    'whisper': 'Whisper',
+    "whisper": "Whisper",
 
     # Text-to-Speech Models (Group or keep separate?)
-    'oute': 'Oute', 
-    'llasa': 'Llama',
-    'spark': 'Spark',
-    'orpheus': 'Orpheus',
+    "oute": "TTS", 
+    "llasa": "TTS",
+    "spark": "TTS",
+    "orpheus": "TTS",
+    "sesame": "TTS",
+
+    # gpt oss
+    "gpt oss": "GPT-OSS",
 
     # Linear Attention
-    'falcon' : 'Linear Attention',
-    'Lfm' : 'Linear Attention',
+    "falcon": "Linear Attention",
+    "liquid": "Linear Attention",
+
+    # Deepseek
+    "deepseek": "Deepseek",
+
+    # Granite
+    "granite": "Granite",
+    
+    # Bert
+    "bert": "BERT",
+    "modernbert": "BERT",
 
     # Other Models (Assign architecture or keep specific)
     # 'codeforces': 'CodeForces Model', # Example
     # 'unsloth': 'Unsloth Model',     # Example
-    'meta synthetic data': 'Llama',
+    "meta synthetic data": "Llama",
 }
 
 TYPE_MAPPING = {
@@ -331,37 +850,62 @@ TYPE_MAPPING = {
 }
 
 KNOWN_TYPES_ORDERED = [
-    'Tool Calling',          
-    'Text Completion',       
-    'Synthetic Data',        
-    'Reasoning Conversational',
-    'GRPO LoRA',             
+    "Tool Calling",          
+    "Text Completion",       
+    "Synthetic Data",        
+    "Reasoning Conversational",
+    "Vision GRPO",
+    "Fine Tuning",
+    "500K Context",
+    "QAT",
     
-    'Conversational',
-    'Alpaca',
-    'Vision',
-    'Reasoning',
-    'Completion',
-    'Finetune',             
-    'Studio',               
-    'Coder',                
-    'Inference',            
-    'Ollama',               
+    "Conversational",
+    "Alpaca",
+    "Vision",
+    "Reasoning",
+    "Completion",
+    "Finetune",             
+    "Studio",               
+    "Coder",                
+    "Inference",            
+    "Ollama",               
+    "Audio",                
+    "Thinking",
+
+    # FP8 GRPO
+    "FP8 GRPO",
+
+    # GPT OSS
+    "GRPO 2048",
+    "GRPO Sudoku",
     
-    'ORPO',
-    'GRPO',
-    'DPO',
-    'CPT',
-    'TTS',                  
-    'LoRA',
-    'VL',                   
-    'RAFT'
+    "ORPO",
+    "GRPO",
+    "DPO",
+    "CPT",
+    "TTS",                  
+    "LoRA",
+    "VL",                   
+    "RAFT",
+
+    # Deepseek OCR
+    "Evaluation",
+    "Eval",
+
+    # BERT, ModernBERT,
+    "Classification",
 ]
 
 def extract_model_info_refined(filename, architecture_mapping, known_types_ordered):
     if not filename.endswith(".ipynb"):
         return {'name': filename, 'size': None, 'type': None, 'architecture': None}
     stem = filename[:-len(".ipynb")]
+
+    requires_a100 = False
+    if 'A100' in stem:
+        requires_a100 = True
+        stem = stem.replace('_A100', '')
+
     original_stem_parts = stem.replace('+', '_').split('_') 
     type_ = None
     stem_searchable = stem.lower().replace('_', ' ').replace('+', ' ')
@@ -444,7 +988,8 @@ def extract_model_info_refined(filename, architecture_mapping, known_types_order
     return {'name': name,
             'size': size,
             'type': type_,
-            'architecture': architecture}
+            'architecture': architecture,
+            'requires_a100': requires_a100}
 
 extracted_info_refined = {}
 original_template_path = os.path.abspath("original_template")
@@ -557,6 +1102,8 @@ def update_notebook_sections(
             general_announcement = general_announcement_content_hf_course.format(full_model_name=full_model_name)
         elif "Meta" in notebook_path:
             general_announcement = general_announcement_content_meta
+        elif "A100" in notebook_path:
+            general_announcement = general_announcement_content_a100
 
         # Update the general announcement section
         if first_markdown_index != -1:
@@ -595,7 +1142,9 @@ def update_notebook_sections(
         is_gguf = False
         is_ollama = False
         is_gemma3 = is_path_contains_any(notebook_path.lower(), ["gemma3"])
+        is_llama = is_path_contains_any(notebook_path.lower(), ["llama"])
         is_vision = is_path_contains_any(notebook_path.lower(), ["vision"])
+        is_qwen3 = is_path_contains_any(notebook_path.lower(), ["qwen3"])
 
         while i < len(notebook_content["cells"]):
             cell = notebook_content["cells"][i]
@@ -630,7 +1179,7 @@ def update_notebook_sections(
                             installation = installation_steps
 
                         # GRPO INSTALLATION
-                        if is_path_contains_any(notebook_path.lower(), ["grpo"]):
+                        if is_path_contains_any(notebook_path.lower(), ["grpo"]) and not is_path_contains_any(notebook_path.lower(), ["gpt_oss", "gpt-oss"]):
                             if is_path_contains_any(notebook_path.lower(), ["kaggle"]):
                                 installation = installation_grpo_kaggle_content
                                 # Kaggle will delete the second cell instead -> Need to check
@@ -702,6 +1251,69 @@ def update_notebook_sections(
                             else:
                                 installation = installation_sesame_csm_content
 
+                        # SGLANG INSTALLATION
+                        if is_path_contains_any(notebook_path.lower(), ["sglang"]):
+                            if is_path_contains_any(notebook_path.lower(), ["kaggle"]):
+                                installation = installation_sglang_kaggle_content
+                            else:
+                                installation = installation_sglang_content
+
+                        # QAT INSTALLATION
+                        if is_path_contains_any(notebook_path.lower(), ["qat"]):
+                            if is_path_contains_any(notebook_path.lower(), ["kaggle"]):
+                                installation = installation_qat_kaggle_content
+                            else:
+                                installation = installation_qat_content
+                                
+                        # GPT OSS INSTALLATION
+                        if is_path_contains_any(notebook_path.lower(), ["gpt_oss", "gpt-oss"]):
+                            if is_path_contains_any(notebook_path.lower(), ["kaggle"]):
+                                installation = installation_gpt_oss_kaggle_content
+                            else:
+                                installation = installation_gpt_oss_content
+
+                        # Llama Vision INSTALLATION
+                        if is_path_contains_any(notebook_path.lower(), ["llama"]) and is_vision:
+                            if is_path_contains_any(notebook_path.lower(), ["kaggle"]):
+                                installation = installation_llama_vision_kaggle_content
+                            else:
+                                installation = installation_llama_vision_content
+
+                        # Gemma3N INSTALLATION
+                        if is_path_contains_any(notebook_path.lower(), ["gemma3n"]):
+                            if is_path_contains_any(notebook_path.lower(), ["kaggle"]):
+                                installation = installation_gemma3n_kaggle_content
+                            else:
+                                installation = installation_gemma3n_content
+
+                        # ERNIE VL INSTALLATION
+                        if is_path_contains_any(notebook_path.lower(), ["ernie_4_5_vl"]):
+                            if is_path_contains_any(notebook_path.lower(), ["kaggle"]):
+                                installation = installation_ernie_4_5_vl_kaggle_content
+                            else:
+                                installation = installation_ernie_4_5_vl_content
+                                
+                        # Deepseek OCR INSTALLATION
+                        if is_path_contains_any(notebook_path.lower(), ["deepseek_ocr"]):
+                            if is_path_contains_any(notebook_path.lower(), ["kaggle"]):
+                                installation = installation_deepseek_ocr_kaggle_content
+                            else:
+                                installation = installation_deepseek_ocr_content
+                                
+                        # Qwen3VL INSTALLATION
+                        if is_path_contains_any(notebook_path.lower(), ["qwen3"]) and is_vision:
+                            if is_path_contains_any(notebook_path.lower(), ["kaggle"]):
+                                installation = installation_qwen3_vl_kaggle_content
+                            else:
+                                installation = installation_qwen3_vl_content
+                                
+                        # Nemotron Nano 3 INSTALLATION also Granite has mamba
+                        if is_path_contains_any(notebook_path.lower(), ["nemotron-3-nano","nemotron-nano-3", "granite4"]):
+                            if is_path_contains_any(notebook_path.lower(), ["kaggle"]):
+                                installation = installation_nemotron_nano_kaggle_content
+                            else:
+                                installation = installation_nemotron_nano_content
+                                
                         notebook_content["cells"][i + 1]["source"] = installation
                         updated = True
                         # TODO: Remove after GRPO numpy bug fixed! 
@@ -726,13 +1338,35 @@ def update_notebook_sections(
                 text_for_last_cell = text_for_last_cell_non_gguf
 
             if last_cell["cell_type"] == "markdown":
-                # Check if the last cell already contains the text
+                # Check if the last cell already contains footer content using key markers
                 existing_text = "".join(last_cell["source"])
-                if text_for_last_cell not in existing_text:
-                  last_cell["source"].extend(
-                      [f"{line}\n" for line in text_for_last_cell.splitlines()]
-                  )
-                  updated = True  # Mark as updated only if content was added
+                # Key markers that indicate footer content already exists
+                footer_markers = [
+                    "And we're done! If you have any questions on Unsloth",
+                    "Train your own reasoning model - Llama GRPO notebook",
+                    "This notebook and all Unsloth notebooks are licensed"
+                ]
+                # Specific check for LGPL license line
+                lgpl_marker = "This notebook and all Unsloth notebooks are licensed [LGPL-3.0]"
+
+                # Check if notebook has partial footer content but missing LGPL line
+                has_partial_footer = any(marker in existing_text for marker in footer_markers[:2])  # First two markers only
+                has_lgpl = lgpl_marker in existing_text
+
+                # Add content if:
+                # 1. No footer markers at all, OR
+                # 2. Has partial footer but missing LGPL license line
+                if not any(marker in existing_text for marker in footer_markers) or (has_partial_footer and not has_lgpl):
+                    # If there's partial footer but missing LGPL, only add the LGPL line
+                    if has_partial_footer and not has_lgpl:
+                        # Add just the LGPL license line
+                        last_cell["source"].append("\n  This notebook and all Unsloth notebooks are licensed [LGPL-3.0](https://github.com/unslothai/notebooks?tab=LGPL-3.0-1-ov-file#readme).\n")
+                    else:
+                        # Add complete footer
+                        last_cell["source"].extend(
+                            [f"{line}\n" for line in text_for_last_cell.splitlines()]
+                        )
+                    updated = True  # Mark as updated only if content was added
             else:
                 notebook_content["cells"].append(
                     {
@@ -849,6 +1483,11 @@ def main():
     notebook_pattern = "*.ipynb"
 
     notebook_files = glob(os.path.join(notebook_directory, notebook_pattern))
+    print(f"Found {len(notebook_files)} notebooks")
+    # filter out the DONT_UPDATE_EXCEPTIONS
+    notebook_files = [x for x in notebook_files if os.path.basename(x) not in DONT_UPDATE_EXCEPTIONS]
+    print(f"Filtered out {len(DONT_UPDATE_EXCEPTIONS)} notebooks")
+    print(f"Remaining {len(notebook_files)} notebooks")
 
     if not notebook_files:
         print(
@@ -865,6 +1504,7 @@ def main():
             new_announcement,
         )
         # update_unsloth_config(notebook_file)
+        update_old_unsloth(notebook_file)
 
 def add_colab_badge(notebooks_dir):
     paths = glob(os.path.join(notebooks_dir, "*.ipynb"))
@@ -939,6 +1579,17 @@ def update_readme(
             continue
 
         notebook_name = os.path.basename(path)
+        old_notebook_name = notebook_name
+        check = False
+        if notebook_name in FIRST_MAPPING_NAME:
+            notebook_name = FIRST_MAPPING_NAME[notebook_name]
+            check = True
+        
+        # For Kaggle
+        if notebook_name.lstrip("Kaggle-") in FIRST_MAPPING_NAME:
+            notebook_name = FIRST_MAPPING_NAME[notebook_name.lstrip("Kaggle-")]
+            notebook_name = "Kaggle-" + notebook_name
+
         std_notebook_name = notebook_name.replace("-", "_")
         is_kaggle = is_path_contains_any(path.lower(), ["kaggle"]) 
 
@@ -950,7 +1601,7 @@ def update_readme(
             )
         except Exception as e:
             print(f"Error processing {notebook_name}: {e}")
-            info = {'name': notebook_name.replace('.ipynb',''), 'size': None, 'type': 'Error', 'architecture': None} # Fallback
+            info = {'name': notebook_name.replace('.ipynb',''), 'size': None, 'type': 'Error', 'architecture': None, 'requires_a100': False} # Fallback
 
         model_name = info['name'] if info and info['name'] else notebook_name.replace('.ipynb','') 
         model_type = info['type'] if info and info['type'] else "" 
@@ -959,20 +1610,25 @@ def update_readme(
         size = size.replace(r"_", " ") if size else None 
         size = f"**({size})**" if size else ""
 
+        requires_a100 = info.get('requires_a100', False)
+
         section_name = "Other" 
         if model_type == 'GRPO':
             section_name = 'GRPO'
         elif architecture and architecture in list_models:
              section_name = architecture
         link_base = base_url_kaggle if is_kaggle else base_url_colab
-        if is_kaggle:
-            link_text = "[![Open in Kaggle](https://kaggle.com/static/images/open-in-kaggle.svg)]"
-        else:
-            link_text = "[![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)]"
         link_url = f"{link_base}{path}"
-        if is_kaggle and kaggle_accelerator:
-             link_url += f"&accelerator={kaggle_accelerator}"
-        link = f"{link_text}({link_url})"
+
+        if is_kaggle:
+            image_src = "https://kaggle.com/static/images/open-in-kaggle.svg"
+            image_alt = "Open in Kaggle"
+            if kaggle_accelerator:
+                link_url += f"&accelerator={kaggle_accelerator}"
+        else:
+            image_src = "https://colab.research.google.com/assets/colab-badge.svg"
+            image_alt = "Open In Colab"
+        link = f'<a href="{link_url}" target="_blank" rel="noopener noreferrer"><img src="{image_src}" alt="{image_alt}"></a>'
 
         notebook_data.append(
             {
@@ -983,6 +1639,7 @@ def update_readme(
                 "path": path, 
                 "architecture" : architecture, 
                 "size" : size, 
+                "requires_a100": requires_a100,
             }
         )
 
@@ -1002,7 +1659,8 @@ def update_readme(
     notebook_data.sort(key=get_sort_key)
 
     for data in notebook_data:
-        row = f"| **{data['model']}** {data['size']} | {data['type']} | {data['link']} |\n"
+        model_prefix = "(A100) " if data.get('requires_a100', False) else ""
+        row = f"| **{model_prefix}{data['model']}** {data['size']} | {data['type']} | {data['link']} |\n"
         platform = "Kaggle" if "kaggle" in data['link'].lower() else "Colab"
         sections[data["section"]][platform]["rows"].append(row)
 
@@ -1124,9 +1782,21 @@ def copy_and_update_notebooks(
     """Copies notebooks from template_dir to destination_dir, updates them, and renames them."""
     template_notebooks = glob(os.path.join(template_dir, "*.ipynb"))
 
+    temp_location = os.path.join(destination_dir, ".temp_backup")
     if os.path.exists(destination_dir):
-        shutil.rmtree(destination_dir)
-    os.makedirs(destination_dir, exist_ok=True)
+        if os.path.exists(temp_location):
+            shutil.rmtree(temp_location)
+        os.makedirs(temp_location, exist_ok=True)
+        # Move everything currently in destination_dir into .temp_backup
+        for entry in os.listdir(destination_dir):
+            if entry == ".temp_backup":
+                continue
+            if entry not in DONT_UPDATE_EXCEPTIONS:
+                continue
+            src_path = os.path.join(destination_dir, entry)
+            shutil.move(src_path, temp_location)
+    else:
+        os.makedirs(destination_dir, exist_ok=True)
 
     for template_notebook_path in template_notebooks:
         notebook_name = os.path.basename(template_notebook_path)
@@ -1166,6 +1836,20 @@ def copy_and_update_notebooks(
             new_announcement,
         )
 
+    # Move Exceptions back to destination_dir from temp_location
+    for entry in DONT_UPDATE_EXCEPTIONS:
+        src_path = os.path.join(temp_location, entry)
+        dst_path = os.path.join(destination_dir, entry)
+        if os.path.exists(src_path):
+            # shutil.rmtree(dst_path)
+            shutil.move(src_path, dst_path)
+            print(f"Moved '{entry}' back to '{dst_path}'")
+        else:
+            print(f"Warning: '{entry}' not found in '{temp_location}'")
+    
+    # finally remove the temp_location
+    shutil.rmtree(temp_location)
+
 def missing_files(nb: str | os.PathLike, original_template: str | os.PathLike) -> list[str]:
     nb_abs = os.path.abspath(nb)
     original_template_abs = os.path.abspath(original_template)
@@ -1178,6 +1862,54 @@ def missing_files(nb: str | os.PathLike, original_template: str | os.PathLike) -
 
     only_in_nb = files_in_nb - files_in_original_template
     return sorted(list(only_in_nb))
+
+
+def remove_unwanted_section(script_content):
+    start_marker = "# ### Installation"
+    end_marker = "# ### Unsloth"
+
+    start_index = script_content.find(start_marker)
+    end_index = script_content.find(end_marker)
+
+    if start_index != -1 and end_index != -1 and start_index < end_index:
+        before_section = script_content[:start_index]
+        section_to_comment = script_content[start_index:end_index]
+        after_section = script_content[end_index:]
+
+        lines = section_to_comment.split('\n')
+        commented_lines = [f"# {line}" for line in lines]
+        commented_section = '\n'.join(commented_lines)
+        return before_section + commented_section + after_section
+    else:
+        return script_content
+
+def convert_notebook_to_script(notebook_path: str, output_path: str):
+    exporter = PythonExporter()
+    with open(notebook_path, 'r', encoding='utf-8') as f:
+        notebook_content = nbformat.read(f, as_version=4)
+
+    (body, resources) = exporter.from_notebook_node(notebook_content)
+
+    body = remove_unwanted_section(body)
+
+    with open(output_path, 'w', encoding='utf-8') as f:
+        f.write(body)
+
+    print(f"Converted {notebook_path} to {output_path}")
+
+def convert_folder(input_folder: str, output_folder: str):
+    if os.path.exists(output_folder):
+        shutil.rmtree(output_folder)
+
+    if not os.path.exists(output_folder):
+        os.makedirs(output_folder)
+
+    for filename in os.listdir(input_folder):
+        if filename.endswith('.ipynb'):
+            notebook_path = os.path.join(input_folder, filename)
+            script_filename = filename.replace('.ipynb', '.py')
+            output_path = os.path.join(output_folder, script_filename)
+            convert_notebook_to_script(notebook_path, output_path)
 
 
 if __name__ == "__main__":
@@ -1197,6 +1929,11 @@ if __name__ == "__main__":
         action="store_true",
         help="If true, instead of checking from original_template to nb, it will check nb to original_template instead"
     )
+    parser.add_argument(
+        "--disable_convert_to_script",
+        action="store_true",
+        help="If true, it will not convert the notebooks to scripts",
+    )
     args = parser.parse_args()
 
     if args.check_missing_files:
@@ -1211,7 +1948,8 @@ if __name__ == "__main__":
         else:
             print(f"Missing files in {nb} compared to {original_template}:")
             for file in missing_files_list:
-                print(file)
+                if file not in DONT_UPDATE_EXCEPTIONS:
+                    print(file)
         exit(0)
     copy_and_update_notebooks(
         "original_template",
@@ -1245,3 +1983,6 @@ if __name__ == "__main__":
         KNOWN_TYPES_ORDERED,
         type_order
     )
+
+    if not args.disable_convert_to_script:
+        convert_folder("nb", "python_scripts")
