@@ -30,18 +30,22 @@ Run on 2 GPUs (training + colocate vLLM share each GPU):
 
 Watch the ``reward`` column climb (be patient — 100-200 steps). Env knobs:
     EXAMPLE_MODEL=unsloth/DeepSeek-R1-0528-Qwen3-8B   EXAMPLE_USE_LORA=0
-    EXAMPLE_MAX_STEPS=200   EXAMPLE_MAX_SEQ_LEN=2048   EXAMPLE_MAX_COMPLETION=1024
-    EXAMPLE_VLLM_GPU_MEM_UTIL=0.3   EXAMPLE_REPORT_TO=wandb
+    EXAMPLE_DATASET=dapo|gsm8k   EXAMPLE_MAX_STEPS=200   EXAMPLE_MAX_SEQ_LEN=2048
+    EXAMPLE_MAX_COMPLETION=1024   EXAMPLE_VLLM_GPU_MEM_UTIL=0.3   EXAMPLE_REPORT_TO=wandb
     EXAMPLE_USE_LANG_REWARD=1   (adds the Bahasa-Indonesia language reward; needs `langid`)
 
-IMPORTANT — this is the HARD combo (a heavy reasoner + competition-hard DAPO-Math +
-think-tag rewards). At a full-FT-affordable budget the native chain rarely closes
-``</think>`` before the cap, so most completions clip, the per-group reward variance can
-collapse, and the climb is slow/stalled. For a thinking-enabled GRPO that climbs FAST
-out of the box, use ``Qwen3_(8B)-GRPO-thinking-FSDP2.py`` (Qwen3-8B + GSM8K, whose chains
-fit a 1024 budget). For the fastest/cleanest climb overall, the ``enable_thinking=False``
-custom-format recipe is best. If you keep this faithful port, give it room
-(``EXAMPLE_MAX_COMPLETION=2048+`` with ``EXAMPLE_USE_LORA=1`` so it fits memory).
+For a climb OUT OF THE BOX, run with ``EXAMPLE_DATASET=gsm8k EXAMPLE_USE_LORA=1
+EXAMPLE_MAX_COMPLETION=2048``: grade-school chains fit the budget so completions
+terminate, and the gsm8k reward reads the final ``\\boxed{}`` answer. Verified on
+DeepSeek-R1-0528-Qwen3-8B (2 GPUs, 60 steps): reward 4.7 -> 5.8, correctness 2.4 -> 3.0,
+completions self-shorten 1653 -> 862 tokens, clip 0.47 -> 0.29.
+
+The DEFAULT (``EXAMPLE_DATASET=dapo``) is the faithful-but-HARD combo: a heavy reasoner +
+competition-hard DAPO-Math + think-tag rewards. At a full-FT-affordable budget the native
+chain rarely closes ``</think>`` before the cap, so most completions clip, per-group reward
+variance can collapse, and the climb is slow/stalled. Give it room
+(``EXAMPLE_MAX_COMPLETION=2048+`` with ``EXAMPLE_USE_LORA=1`` so it fits memory), or switch
+to ``EXAMPLE_DATASET=gsm8k`` as above.
 """
 from __future__ import annotations
 
@@ -64,6 +68,11 @@ from unsloth_dist.grpo_colocate import prepare_grpo_vllm, setup_grpo_vllm
 MODEL = os.environ.get("EXAMPLE_MODEL", "unsloth/DeepSeek-R1-0528-Qwen3-8B")
 MAX_SEQ_LEN = int(os.environ.get("EXAMPLE_MAX_SEQ_LEN", "2048"))
 MAX_COMPLETION = int(os.environ.get("EXAMPLE_MAX_COMPLETION", "1024"))
+# Dataset: "dapo" (faithful default; competition-hard, chains often exceed the
+# budget -> reward can flat-line) or "gsm8k" (grade-school, chains fit -> the
+# reward actually climbs). The reward stack below is format-generic (it scores
+# the text after </think> against a gold answer), so it works for either.
+DATASET = os.environ.get("EXAMPLE_DATASET", "dapo").lower()
 MAX_STEPS = int(os.environ.get("EXAMPLE_MAX_STEPS", "200"))
 USE_LORA = os.environ.get("EXAMPLE_USE_LORA", "0") == "1"
 LORA_RANK = int(os.environ.get("EXAMPLE_LORA_RANK", "32"))
@@ -126,15 +135,33 @@ def main():
     reasoning_start = reasoning_start or "<think>"
     reasoning_end = reasoning_end or "</think>"
 
-    # --- dataset (DAPO-Math, verbatim mapping) ------------------------------ #
-    dataset = load_dataset("open-r1/DAPO-Math-17k-Processed", "en", split="train")
-    dataset = dataset.map(lambda x: {
-        "prompt": [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": x["prompt"]},
-        ],
-        "answer": x["solution"],
-    })
+    # --- dataset ------------------------------------------------------------ #
+    if DATASET == "gsm8k":
+        # Grade-school math: chains fit a modest budget, so completions terminate
+        # and the answer reward gets a real gradient. Gold answer = the number
+        # after "####"; the reward stack scores the text after </think>.
+        def _gsm8k_answer(text):
+            m = re.search(r"####\s*([-\d,\.]+)", text)
+            return m.group(1).replace(",", "").strip() if m else None
+
+        dataset = load_dataset("openai/gsm8k", "main", split="train")
+        dataset = dataset.map(lambda x: {
+            "prompt": [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": x["question"]},
+            ],
+            "answer": _gsm8k_answer(x["answer"]),
+        }, remove_columns=dataset.column_names)
+    else:
+        # DAPO-Math, verbatim mapping (faithful to the source notebook).
+        dataset = load_dataset("open-r1/DAPO-Math-17k-Processed", "en", split="train")
+        dataset = dataset.map(lambda x: {
+            "prompt": [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": x["prompt"]},
+            ],
+            "answer": x["solution"],
+        })
 
     # --- reward functions (verbatim from the notebook) ---------------------- #
     match_format = re.compile(rf"{reasoning_end}(.*)", re.DOTALL)
@@ -212,7 +239,39 @@ def main():
                 scores.append(0.0)
         return scores
 
-    reward_funcs = [match_format_exactly, match_format_approximately, check_answer, check_numbers]
+    # GSM8K answers come back as \boxed{N} (or a trailing number) after </think>;
+    # the verbatim DAPO check_answer/check_numbers misread that (they compare the
+    # whole post-</think> paragraph to the bare number, and match_numbers grabs the
+    # first digit/comma anywhere in the reasoning). Use a boxed/last-number
+    # extractor + numeric compare for the gsm8k path; keep the DAPO rewards verbatim.
+    def _extract_final_number(text):
+        region = text.split(reasoning_end, 1)[-1] if reasoning_end in text else text
+        mb = re.search(r"\\boxed\{([^}]*)\}", region)
+        src = mb.group(1) if mb else region
+        nums = re.findall(r"-?\d[\d,]*(?:\.\d+)?", src)
+        return nums[-1].replace(",", "").rstrip(".") if nums else None
+
+    def gsm8k_correctness(prompts, completions, answer, **kwargs):
+        responses = [c[0]["content"] for c in completions]
+        extracted = [_extract_final_number(r) for r in responses]
+        if is_main_process() and printed["n"] % 5 == 0:
+            print("*" * 20 + f"Answer: {answer[0]}  Extracted: {extracted[0]}", flush=True)
+        printed["n"] += 1
+        scores = []
+        for guess, gold in zip(extracted, answer):
+            if guess is None:
+                scores.append(-2.0)
+                continue
+            try:
+                scores.append(5.0 if abs(float(guess) - float(gold)) < 1e-6 else -1.0)
+            except Exception:
+                scores.append(-1.0)
+        return scores
+
+    if DATASET == "gsm8k":
+        reward_funcs = [match_format_exactly, match_format_approximately, gsm8k_correctness]
+    else:
+        reward_funcs = [match_format_exactly, match_format_approximately, check_answer, check_numbers]
 
     if USE_LANG_REWARD:
         try:
